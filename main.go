@@ -40,7 +40,10 @@ var (
 	ssdb_conf_init   = ssdb_prefix + "/etc/init_option.json"
 	ssdb_conf        = ssdb_prefix + "/etc/ssdb.conf"
 	ssdb_conf_tpl    = ssdb_prefix + "/etc/ssdb.conf.default"
-	ssdb_mem_min     = 16 * inapi.ByteMB
+	ssdb_cs_min      = inapi.ByteMB * 16   // min cache size
+	ssdb_cs_max      = inapi.ByteMB * 1024 // max cache size
+	ssdb_wbs_min     = inapi.ByteMB * 8    // min write buffer size
+	ssdb_wbs_max     = inapi.ByteMB * 128  // max write buffer size
 	pod_inst_updated time.Time
 	mu               sync.Mutex
 	cfg_mu           sync.Mutex
@@ -56,8 +59,8 @@ type EnvConfig struct {
 }
 
 type EnvConfigResource struct {
-	Ram int64 `json:"ram"`
-	Cpu int64 `json:"cpu"`
+	CacheSize       int64 `json:"cache_size"`
+	WriteBufferSize int64 `json:"write_buffer_size"`
 }
 
 func main() {
@@ -114,7 +117,7 @@ func do() {
 		}
 
 		if inst.Spec.Box.Resources.MemLimit > 0 {
-			cfg_next.Resource.Ram = inst.Spec.Box.Resources.MemLimit
+			cfg_next.Resource.CacheSize = inst.Spec.Box.Resources.MemLimit
 		}
 	}
 
@@ -141,36 +144,39 @@ func do() {
 			return
 		}
 
-		if v, ok := option.Items.Get("memory_usage_limit"); ok {
-
-			ram_pc := v.Int64()
-
-			if ram_pc < 10 || ram_pc > 100 {
-				hlog.Print("error", "Invalid memory_usage_limit Setup")
-				return
-			}
-
-			ram_pc = (cfg_next.Resource.Ram * ram_pc) / 100
-			if offset := ram_pc % ssdb_mem_min; offset > 0 {
-				ram_pc += offset
-			}
-			if ram_pc < ssdb_mem_min {
-				ram_pc = ssdb_mem_min
-			}
-			if ram_pc < cfg_next.Resource.Ram {
-				cfg_next.Resource.Ram = ram_pc
-			}
-
-		} else {
-			hlog.Print("error", "No memory_usage_limit Found")
-			return
+		//
+		csize := ssdb_cs_min
+		if v, ok := option.Items.Get("cache_size"); ok {
+			csize = (inst.Spec.Box.Resources.MemLimit * v.Int64()) / 100
+			csize = csize / 10
 		}
-	}
+		if offset := csize % (8 * inapi.ByteMB); offset > 0 {
+			csize += offset
+		}
+		if csize < ssdb_cs_min {
+			csize = ssdb_cs_min
+		} else if csize > ssdb_cs_max {
+			csize = ssdb_cs_max
+		}
+		cfg_next.Resource.CacheSize = csize
 
-	//
-	if cfg_next.Resource.Ram < ssdb_mem_min {
-		hlog.Print("error", "Not enough Memory to fit this MySQL Instance")
-		return
+		//
+		wbsize := ssdb_wbs_min
+		if v, ok := option.Items.Get("write_buffer_size"); ok {
+			wbsize = v.Int64() * inapi.ByteMB
+		}
+		if wbsize > inst.Spec.Box.Resources.MemLimit/20 {
+			wbsize = inst.Spec.Box.Resources.MemLimit / 20
+		}
+		if n := wbsize % (8 * inapi.ByteMB); n > 0 {
+			wbsize -= n
+		}
+		if wbsize < ssdb_wbs_min {
+			wbsize = ssdb_wbs_min
+		} else if wbsize > ssdb_wbs_max {
+			wbsize = ssdb_wbs_max
+		}
+		cfg_next.Resource.WriteBufferSize = wbsize
 	}
 
 	//
@@ -184,12 +190,14 @@ func do() {
 		return
 	}
 
-	if cfg_last.Resource.Ram != cfg_next.Resource.Ram {
+	if cfg_last.Resource.CacheSize != cfg_next.Resource.CacheSize ||
+		cfg_last.Resource.WriteBufferSize != cfg_next.Resource.WriteBufferSize {
 		if err := restart(); err != nil {
 			hlog.Print("error", err.Error())
 			return
 		}
-		cfg_last.Resource.Ram = cfg_next.Resource.Ram
+		cfg_last.Resource.CacheSize = cfg_next.Resource.CacheSize
+		cfg_last.Resource.WriteBufferSize = cfg_next.Resource.WriteBufferSize
 
 	} else {
 
@@ -247,20 +255,28 @@ func file_render(dst_file, src_file string, sets map[string]string) error {
 
 func init_cnf() error {
 
-	if cfg_last.Inited && cfg_last.Resource.Ram == cfg_next.Resource.Ram {
+	if cfg_last.Inited &&
+		cfg_last.Resource.CacheSize == cfg_next.Resource.CacheSize &&
+		cfg_last.Resource.WriteBufferSize == cfg_next.Resource.WriteBufferSize {
 		return nil
 	}
 
 	//
-	ram := int(cfg_next.Resource.Ram/inapi.ByteMB) / 8
+	var (
+		cs  = cfg_next.Resource.CacheSize / inapi.ByteMB
+		wbs = cfg_next.Resource.WriteBufferSize / inapi.ByteMB
+	)
 	sets := map[string]string{
-		"project_prefix":      ssdb_prefix,
-		"leveldb_cache_size":  fmt.Sprintf("%d", ram),
-		"leveldb_compression": "no",
-		"server_auth":         cfg_next.RootAuth,
+		"project_prefix":            ssdb_prefix,
+		"server_auth":               cfg_next.RootAuth,
+		"leveldb_cache_size":        fmt.Sprintf("%d", cs),
+		"leveldb_write_buffer_size": fmt.Sprintf("%d", wbs),
+		"leveldb_compression":       "no",
 	}
 
-	if !cfg_last.Inited || cfg_last.Resource.Ram != cfg_next.Resource.Ram {
+	if !cfg_last.Inited ||
+		cfg_last.Resource.CacheSize != cfg_next.Resource.CacheSize ||
+		cfg_last.Resource.WriteBufferSize != cfg_next.Resource.WriteBufferSize {
 		if err := file_render(ssdb_conf, ssdb_conf_tpl, sets); err != nil {
 			return err
 		}
@@ -272,7 +288,8 @@ func init_cnf() error {
 			return err
 		}
 
-		cfg_last.Resource.Ram = cfg_next.Resource.Ram
+		cfg_last.Resource.CacheSize = cfg_next.Resource.CacheSize
+		cfg_last.Resource.WriteBufferSize = cfg_next.Resource.WriteBufferSize
 	}
 
 	cfg_last = cfg_next
