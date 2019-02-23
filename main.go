@@ -31,7 +31,7 @@ import (
 )
 
 var (
-	ssdb_prefix     = "/home/action/apps/ssdb"
+	ssdb_prefix     = "/opt/ssdb/ssdb"
 	ssdb_datadir    = ssdb_prefix + "/var"
 	ssdb_bin_server = ssdb_prefix + "/bin/ssdb-server"
 	ssdb_conf_init  = ssdb_prefix + "/etc/init_option.json"

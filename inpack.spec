@@ -8,8 +8,6 @@ description = A high performance NoSQL database supporting many data structures,
 
 %build
 
-PREFIX="{{.project__prefix}}"
-
 cd {{.inpack__pack_dir}}/deps
 
 if [ ! -f "{{.project__version}}.tar.gz" ]; then
@@ -32,7 +30,6 @@ install ssdb-server             {{.buildroot}}/bin/ssdb-server
 
 cd {{.inpack__pack_dir}}
 
-go build -ldflags "-w -s" -o {{.buildroot}}/bin/ssdb-inner main.go
 install misc/ssdb.conf.default      {{.buildroot}}/etc/ssdb.conf.default
 
 rm -rf {{.inpack__pack_dir}}/deps/ssdb-{{.project__version}}
