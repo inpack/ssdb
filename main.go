@@ -102,7 +102,7 @@ func do() {
 			}
 		}
 
-		appCfr := podCfr.AppConfigurator("sysinner-ssdbl-*")
+		appCfr := podCfr.AppConfigurator("sysinner-ssdb-*")
 		if appCfr == nil {
 			hlog.Print("error", "No AppSpec (sysinner-ssdb) Found")
 			return
