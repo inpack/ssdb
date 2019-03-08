@@ -48,16 +48,50 @@ var (
 	pgPodCfr        *inconf.PodConfigurator
 )
 
+type EnvConfigReplica struct {
+	Id   uint32 `json:"id"`
+	Host string `json:"host"`
+	Port uint32 `json:"port"`
+	Type string `json:"type"`
+}
+
 type EnvConfig struct {
-	Inited   bool              `json:"inited"`
-	RootAuth string            `json:"root_auth"`
-	Resource EnvConfigResource `json:"resource"`
-	Updated  time.Time         `json:"updated"`
+	Inited   bool               `json:"inited"`
+	RootAuth string             `json:"root_auth"`
+	Resource EnvConfigResource  `json:"resource"`
+	Updated  time.Time          `json:"updated"`
+	Reps     []EnvConfigReplica `json:"reps"`
 }
 
 type EnvConfigResource struct {
 	CacheSize       int32 `json:"cache_size"`
 	WriteBufferSize int32 `json:"write_buffer_size"`
+}
+
+func (it *EnvConfig) RepEqual(ls []EnvConfigReplica) bool {
+
+	if len(it.Reps) != len(ls) {
+		return false
+	}
+
+	for _, v := range it.Reps {
+		mat := false
+		for _, v2 := range ls {
+			if v.Id == v2.Id &&
+				v.Type == v2.Type &&
+				v.Host == v2.Host &&
+				v.Port == v2.Port {
+
+				mat = true
+				break
+			}
+		}
+		if !mat {
+			return false
+		}
+	}
+
+	return true
 }
 
 func main() {
@@ -80,6 +114,7 @@ func do() {
 	var (
 		tstart = time.Now()
 		podCfr *inconf.PodConfigurator
+		appCfr *inconf.AppConfigurator
 		appCfg *inconf.AppConfigGroup
 	)
 
@@ -102,7 +137,7 @@ func do() {
 			}
 		}
 
-		appCfr := podCfr.AppConfigurator("sysinner-ssdb-*")
+		appCfr = podCfr.AppConfigurator("sysinner-ssdb-*")
 		if appCfr == nil {
 			hlog.Print("error", "No AppSpec (sysinner-ssdb) Found")
 			return
@@ -158,6 +193,23 @@ func do() {
 			wbsize = ssdb_wbs_max
 		}
 		cfg_next.Resource.WriteBufferSize = wbsize
+
+		//
+		reps := []EnvConfigReplica{}
+		if srvPort := appCfr.AppService("sysinner-ssdb-mn", 0); srvPort != nil {
+			for _, ep := range srvPort.Endpoints {
+				if ep.Rep == podCfr.Pod.Replica.RepId {
+					continue
+				}
+				reps = append(reps, EnvConfigReplica{
+					Id:   ep.Rep,
+					Type: "mirror",
+					Host: ep.Ip,
+					Port: ep.Port,
+				})
+			}
+		}
+		cfg_next.Reps = reps
 	}
 
 	//
@@ -172,13 +224,15 @@ func do() {
 	}
 
 	if cfg_last.Resource.CacheSize != cfg_next.Resource.CacheSize ||
-		cfg_last.Resource.WriteBufferSize != cfg_next.Resource.WriteBufferSize {
+		cfg_last.Resource.WriteBufferSize != cfg_next.Resource.WriteBufferSize ||
+		!cfg_last.RepEqual(cfg_next.Reps) {
 		if err := restart(); err != nil {
 			hlog.Print("error", err.Error())
 			return
 		}
 		cfg_last.Resource.CacheSize = cfg_next.Resource.CacheSize
 		cfg_last.Resource.WriteBufferSize = cfg_next.Resource.WriteBufferSize
+		cfg_last.Reps = cfg_next.Reps
 
 	} else {
 
@@ -196,7 +250,8 @@ func init_cnf() error {
 
 	if cfg_last.Inited &&
 		cfg_last.Resource.CacheSize == cfg_next.Resource.CacheSize &&
-		cfg_last.Resource.WriteBufferSize == cfg_next.Resource.WriteBufferSize {
+		cfg_last.Resource.WriteBufferSize == cfg_next.Resource.WriteBufferSize &&
+		cfg_last.RepEqual(cfg_next.Reps) {
 		return nil
 	}
 
@@ -211,11 +266,18 @@ func init_cnf() error {
 		"leveldb_cache_size":        fmt.Sprintf("%d", cs),
 		"leveldb_write_buffer_size": fmt.Sprintf("%d", wbs),
 		"leveldb_compression":       "no",
+		"reps":                      cfg_next.Reps,
+	}
+	if len(cfg_next.Reps) > 0 {
+		sets["rep_binlog_enable"] = "yes"
+	} else {
+		sets["rep_binlog_enable"] = "no"
 	}
 
 	if !cfg_last.Inited ||
 		cfg_last.Resource.CacheSize != cfg_next.Resource.CacheSize ||
-		cfg_last.Resource.WriteBufferSize != cfg_next.Resource.WriteBufferSize {
+		cfg_last.Resource.WriteBufferSize != cfg_next.Resource.WriteBufferSize ||
+		!cfg_last.RepEqual(cfg_next.Reps) {
 		if err := filerender.Render(ssdb_conf_tpl, ssdb_conf, 0644, sets); err != nil {
 			return err
 		}
@@ -229,6 +291,7 @@ func init_cnf() error {
 
 		cfg_last.Resource.CacheSize = cfg_next.Resource.CacheSize
 		cfg_last.Resource.WriteBufferSize = cfg_next.Resource.WriteBufferSize
+		cfg_last.Reps = cfg_next.Reps
 	}
 
 	cfg_last = cfg_next
